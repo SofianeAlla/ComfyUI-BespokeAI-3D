@@ -395,14 +395,17 @@ class BespokeAI3DGenerationFromURL:
 class BespokeAI3DPreview:
     """
     Preview a 3D GLB file in ComfyUI using the built-in 3D viewer.
-    Connect the glb_path output from BespokeAI 3D Generation to this node.
-    The 3D model will be displayed in the native viewer after execution.
+    Features a native 3D viewer widget. Connect the glb_path output
+    from BespokeAI 3D Generation to load the generated model.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "viewer": ("LOAD_3D", {}),
+            },
+            "optional": {
                 "model_file": ("STRING", {"default": "", "forceInput": True}),
             }
         }
@@ -412,35 +415,31 @@ class BespokeAI3DPreview:
     CATEGORY = "BespokeAI/3D"
     OUTPUT_NODE = True
 
-    def preview_3d(self, model_file):
-        if not model_file:
-            print("[BespokeAI] No model file path provided")
-            return {"ui": {"result": ["", None, None]}}
+    def preview_3d(self, viewer, model_file=None):
+        # If model_file is provided (from generation node), use it
+        if model_file:
+            output_dir = folder_paths.get_output_directory()
+            input_dir = folder_paths.get_input_directory()
 
-        # Convert absolute path to relative path for the viewer
-        output_dir = folder_paths.get_output_directory()
-        input_dir = folder_paths.get_input_directory()
+            model_file_norm = os.path.normpath(model_file)
+            output_dir_norm = os.path.normpath(output_dir)
+            input_dir_norm = os.path.normpath(input_dir)
 
-        model_file_norm = os.path.normpath(model_file)
-        output_dir_norm = os.path.normpath(output_dir)
-        input_dir_norm = os.path.normpath(input_dir)
+            # Build relative path for the viewer
+            if model_file_norm.startswith(output_dir_norm):
+                rel_path = os.path.relpath(model_file_norm, output_dir_norm)
+                viewer_path = "output/" + rel_path.replace("\\", "/")
+            elif model_file_norm.startswith(input_dir_norm):
+                rel_path = os.path.relpath(model_file_norm, input_dir_norm)
+                viewer_path = rel_path.replace("\\", "/")
+            else:
+                viewer_path = model_file.replace("\\", "/")
 
-        # Build relative path - the viewer needs paths relative to ComfyUI base
-        if model_file_norm.startswith(output_dir_norm):
-            rel_path = os.path.relpath(model_file_norm, output_dir_norm)
-            # For output files, prepend "output/"
-            viewer_path = "output/" + rel_path.replace("\\", "/")
-        elif model_file_norm.startswith(input_dir_norm):
-            rel_path = os.path.relpath(model_file_norm, input_dir_norm)
-            viewer_path = rel_path.replace("\\", "/")
-        else:
-            # Try using the path as-is (might be already relative)
-            viewer_path = model_file.replace("\\", "/")
+            print(f"[BespokeAI] 3D Preview loading: {viewer_path}")
+            return {"ui": {"result": [viewer_path, None, None]}}
 
-        print(f"[BespokeAI] 3D Preview loading: {viewer_path}")
-
-        # Return in Preview3D format: [model_file, camera_info, bg_image_path]
-        return {"ui": {"result": [viewer_path, None, None]}}
+        # If no model_file, just return empty (viewer widget handles its own display)
+        return {"ui": {"result": ["", None, None]}}
 
 
 # Node mappings for ComfyUI
