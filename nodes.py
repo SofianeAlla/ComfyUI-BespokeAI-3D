@@ -11,7 +11,6 @@ import struct
 import requests
 import numpy as np
 import torch
-import threading
 from io import BytesIO
 from PIL import Image
 import folder_paths
@@ -194,7 +193,7 @@ class BespokeAI3DGeneration:
         return response.json()
 
     def poll_task_with_progress(self, api_key, task_id, segmentation):
-        """Poll for task completion with smooth progress bar."""
+        """Poll for task completion with smooth 5-minute progress bar."""
         headers = {"X-API-Key": api_key}
 
         params = {"taskId": task_id}
@@ -202,67 +201,60 @@ class BespokeAI3DGeneration:
             params["segmentation"] = "true"
 
         start_time = time.time()
-        poll_interval = 5.0  # Poll API every 5 seconds
 
-        # Total steps for 5 minutes = 300 seconds
+        # 5 minutes = 300 seconds, update every 3 seconds = 100 steps
         total_steps = 100
+        step_duration = self.GENERATION_TIME / total_steps  # 3 seconds per step
         pbar = comfy.utils.ProgressBar(total_steps)
 
-        # Track completion status
-        completed = False
-        result_data = None
-        error_msg = None
+        current_step = 0
+        last_check_time = 0
+        check_interval = 5.0  # Check API every 5 seconds
 
-        def update_progress():
-            """Update progress bar smoothly every second."""
-            nonlocal completed
-            while not completed:
-                elapsed = time.time() - start_time
-                # Progress goes from 0 to 95 over 5 minutes (300 seconds)
-                current_step = min(95, int((elapsed / self.GENERATION_TIME) * 95))
+        while current_step < total_steps:
+            elapsed = time.time() - start_time
+
+            # Update progress bar based on time (smooth increment)
+            expected_step = min(99, int((elapsed / self.GENERATION_TIME) * 100))
+            if expected_step > current_step:
+                current_step = expected_step
                 pbar.update_absolute(current_step)
-                time.sleep(1)
 
-        # Start progress updater thread
-        progress_thread = threading.Thread(target=update_progress, daemon=True)
-        progress_thread.start()
-
-        try:
-            while True:
-                # Check API status
+            # Check API status periodically
+            if elapsed - last_check_time >= check_interval:
+                last_check_time = elapsed
                 try:
                     response = requests.get(self.API_URL, headers=headers, params=params, timeout=30)
-                except requests.exceptions.RequestException as e:
-                    # Network error, keep trying
-                    time.sleep(poll_interval)
-                    continue
 
-                if not response.ok:
-                    error_data = response.json() if response.text else {}
-                    error_msg = f"Generation failed: {error_data.get('error', response.text)}"
-                    break
+                    if response.ok:
+                        data = response.json()
+                        status = data.get("status", "unknown")
 
+                        if status == "complete":
+                            # Success! Jump to 100%
+                            pbar.update_absolute(total_steps)
+                            return data
+                        elif status == "failed" or "error" in data:
+                            raise RuntimeError(f"Generation failed: {data.get('error', 'Unknown error')}")
+                except requests.exceptions.RequestException:
+                    # Network error, continue waiting
+                    pass
+
+            # Small sleep to prevent busy loop
+            time.sleep(0.5)
+
+        # If we reach here, 5 minutes passed - do one final check
+        try:
+            response = requests.get(self.API_URL, headers=headers, params=params, timeout=30)
+            if response.ok:
                 data = response.json()
-                status = data.get("status", "unknown")
+                if data.get("status") == "complete":
+                    pbar.update_absolute(total_steps)
+                    return data
+        except:
+            pass
 
-                if status == "complete":
-                    result_data = data
-                    break
-                elif status == "failed" or "error" in data:
-                    error_msg = f"Generation failed: {data.get('error', 'Unknown error')}"
-                    break
-
-                time.sleep(poll_interval)
-        finally:
-            completed = True
-            progress_thread.join(timeout=2)
-
-        if error_msg:
-            raise RuntimeError(error_msg)
-
-        # Show 100% completion
-        pbar.update_absolute(100)
-        return result_data
+        raise RuntimeError("Generation timed out after 5 minutes. Please try again.")
 
     def generate_3d(self, image, api_key, resolution, with_texture, ai_enhancement,
                     low_poly=False, segmentation=False, prompt=""):
