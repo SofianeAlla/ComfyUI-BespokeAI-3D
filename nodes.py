@@ -14,7 +14,6 @@ import torch
 from io import BytesIO
 from PIL import Image
 import folder_paths
-from comfy_api.latest import IO, Types
 
 
 def parse_glb(glb_data):
@@ -85,7 +84,22 @@ def parse_glb(glb_data):
     return vertices, faces
 
 
-class BespokeAI3DGeneration(IO.ComfyNode):
+# Try to import MESH type from ComfyUI
+try:
+    from comfy_api.latest._util import MESH
+except ImportError:
+    try:
+        from comfy_api.latest import Types
+        MESH = Types.MESH
+    except ImportError:
+        # Fallback: define our own MESH class
+        class MESH:
+            def __init__(self, vertices, faces):
+                self.vertices = vertices
+                self.faces = faces
+
+
+class BespokeAI3DGeneration:
     """
     Generate 3D models from images using BespokeAI API.
     Supports AI enhancement, PBR textures, low-poly mode, and part segmentation.
@@ -95,30 +109,138 @@ class BespokeAI3DGeneration(IO.ComfyNode):
     GENERATION_TIME = 300  # 5 minutes in seconds
 
     @classmethod
-    def define_schema(cls):
-        return IO.Schema(
-            node_id="BespokeAI3DGeneration",
-            display_name="BespokeAI 3D Generation",
-            category="BespokeAI/3D",
-            inputs=[
-                IO.Image.Input("image"),
-                IO.String.Input("api_key", default="", multiline=False),
-                IO.Combo.Input("resolution", options=["500k", "1m", "1.5m"], default="1m"),
-                IO.Boolean.Input("with_texture", default=True),
-                IO.Boolean.Input("ai_enhancement", default=True),
-                IO.Boolean.Input("low_poly", default=False, optional=True),
-                IO.Boolean.Input("segmentation", default=False, optional=True),
-                IO.String.Input("prompt", default="", multiline=True, optional=True),
-            ],
-            outputs=[
-                IO.Mesh.Output("mesh"),
-                IO.String.Output("glb_url"),
-            ]
-        )
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "api_key": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                }),
+                "resolution": (["500k", "1m", "1.5m"], {"default": "1m"}),
+                "with_texture": ("BOOLEAN", {"default": True}),
+                "ai_enhancement": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "low_poly": ("BOOLEAN", {"default": False}),
+                "segmentation": ("BOOLEAN", {"default": False}),
+                "prompt": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                }),
+            }
+        }
 
-    @classmethod
-    def execute(cls, image, api_key, resolution, with_texture, ai_enhancement,
-                low_poly=False, segmentation=False, prompt="") -> IO.NodeOutput:
+    RETURN_TYPES = ("MESH", "STRING")
+    RETURN_NAMES = ("mesh", "glb_url")
+    FUNCTION = "generate_3d"
+    CATEGORY = "BespokeAI/3D"
+
+    def __init__(self):
+        self.output_dir = folder_paths.get_output_directory()
+        self.model_dir = os.path.join(self.output_dir, "bespokeai_3d")
+        os.makedirs(self.model_dir, exist_ok=True)
+
+    def image_to_base64(self, image_tensor):
+        """Convert ComfyUI IMAGE tensor to base64 PNG string."""
+        if len(image_tensor.shape) == 4:
+            image_tensor = image_tensor[0]
+
+        img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
+        pil_image = Image.fromarray(img_np)
+
+        buffer = BytesIO()
+        pil_image.save(buffer, format="PNG")
+        base64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        return f"data:image/png;base64,{base64_str}"
+
+    def submit_generation(self, api_key, image_data, resolution, with_texture,
+                          ai_enhancement, low_poly, segmentation, prompt):
+        """Submit 3D generation request to BespokeAI API."""
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": api_key
+        }
+
+        payload = {
+            "imageData": image_data,
+            "resolution": resolution,
+            "withTexture": with_texture,
+            "aiEnhancement": ai_enhancement,
+            "lowPoly": low_poly,
+            "segmentation": segmentation,
+        }
+
+        if prompt and prompt.strip():
+            payload["prompt"] = prompt.strip()
+
+        response = requests.post(self.API_URL, headers=headers, json=payload, timeout=60)
+
+        if response.status_code == 401:
+            raise ValueError("Invalid API key. Please check your BespokeAI API key.")
+        elif response.status_code == 402:
+            raise ValueError("Insufficient credits. Please add more credits to your BespokeAI account.")
+        elif response.status_code == 429:
+            raise ValueError("Rate limit exceeded. Please wait before making more requests.")
+        elif response.status_code == 400:
+            error_data = response.json()
+            raise ValueError(f"Invalid request: {error_data.get('error', 'Unknown error')}")
+        elif not response.ok:
+            raise RuntimeError(f"API request failed with status {response.status_code}: {response.text}")
+
+        return response.json()
+
+    def poll_task_with_progress(self, api_key, task_id, segmentation):
+        """Poll for task completion with smooth progress bar."""
+        headers = {"X-API-Key": api_key}
+
+        params = {"taskId": task_id}
+        if segmentation:
+            params["segmentation"] = "true"
+
+        start_time = time.time()
+        poll_interval = 3.0
+
+        while True:
+            elapsed = time.time() - start_time
+
+            # Calculate smooth progress (0-95% over 5 minutes, last 5% on completion)
+            progress = min(95, (elapsed / self.GENERATION_TIME) * 95)
+
+            # Create progress bar
+            bar_length = 40
+            filled = int(bar_length * progress / 100)
+            bar = "=" * filled + ">" + " " * (bar_length - filled - 1)
+            elapsed_min = int(elapsed // 60)
+            elapsed_sec = int(elapsed % 60)
+
+            print(f"\r[BespokeAI] [{bar}] {progress:.1f}% - {elapsed_min:02d}:{elapsed_sec:02d} elapsed", end="", flush=True)
+
+            # Check API status
+            response = requests.get(self.API_URL, headers=headers, params=params, timeout=30)
+
+            if not response.ok:
+                print()  # New line after progress bar
+                error_data = response.json() if response.text else {}
+                raise RuntimeError(f"Generation failed: {error_data.get('error', response.text)}")
+
+            data = response.json()
+            status = data.get("status", "unknown")
+
+            if status == "complete":
+                # Show 100% completion
+                bar = "=" * bar_length
+                print(f"\r[BespokeAI] [{bar}] 100.0% - Complete!                    ")
+                return data
+            elif status == "failed" or "error" in data:
+                print()  # New line after progress bar
+                raise RuntimeError(f"Generation failed: {data.get('error', 'Unknown error')}")
+
+            time.sleep(poll_interval)
+
+    def generate_3d(self, image, api_key, resolution, with_texture, ai_enhancement,
+                    low_poly=False, segmentation=False, prompt=""):
         """Main generation function."""
 
         if not api_key or not api_key.strip():
@@ -131,10 +253,10 @@ class BespokeAI3DGeneration(IO.ComfyNode):
             resolution = "500k"
 
         print("[BespokeAI] Preparing image...")
-        image_data = cls.image_to_base64(image)
+        image_data = self.image_to_base64(image)
 
         print("[BespokeAI] Submitting 3D generation request...")
-        submit_response = cls.submit_generation(
+        submit_response = self.submit_generation(
             api_key=api_key,
             image_data=image_data,
             resolution=resolution,
@@ -150,7 +272,7 @@ class BespokeAI3DGeneration(IO.ComfyNode):
         print(f"[BespokeAI] Task submitted: {task_id}")
         print("[BespokeAI] Generating 3D model (this may take up to 5 minutes)...")
 
-        result = cls.poll_task_with_progress(
+        result = self.poll_task_with_progress(
             api_key=api_key,
             task_id=task_id,
             segmentation=segmentation
@@ -185,115 +307,14 @@ class BespokeAI3DGeneration(IO.ComfyNode):
         vertices = vertices.unsqueeze(0)
         faces = faces.unsqueeze(0)
 
-        mesh = Types.MESH(vertices, faces)
+        mesh = MESH(vertices, faces)
 
         print("[BespokeAI] 3D generation complete!")
 
-        return IO.NodeOutput(mesh, glb_url)
-
-    @staticmethod
-    def image_to_base64(image_tensor):
-        """Convert ComfyUI IMAGE tensor to base64 PNG string."""
-        if len(image_tensor.shape) == 4:
-            image_tensor = image_tensor[0]
-
-        img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
-        pil_image = Image.fromarray(img_np)
-
-        buffer = BytesIO()
-        pil_image.save(buffer, format="PNG")
-        base64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-        return f"data:image/png;base64,{base64_str}"
-
-    @staticmethod
-    def submit_generation(api_key, image_data, resolution, with_texture,
-                          ai_enhancement, low_poly, segmentation, prompt):
-        """Submit 3D generation request to BespokeAI API."""
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-Key": api_key
-        }
-
-        payload = {
-            "imageData": image_data,
-            "resolution": resolution,
-            "withTexture": with_texture,
-            "aiEnhancement": ai_enhancement,
-            "lowPoly": low_poly,
-            "segmentation": segmentation,
-        }
-
-        if prompt and prompt.strip():
-            payload["prompt"] = prompt.strip()
-
-        response = requests.post(BespokeAI3DGeneration.API_URL, headers=headers, json=payload, timeout=60)
-
-        if response.status_code == 401:
-            raise ValueError("Invalid API key. Please check your BespokeAI API key.")
-        elif response.status_code == 402:
-            raise ValueError("Insufficient credits. Please add more credits to your BespokeAI account.")
-        elif response.status_code == 429:
-            raise ValueError("Rate limit exceeded. Please wait before making more requests.")
-        elif response.status_code == 400:
-            error_data = response.json()
-            raise ValueError(f"Invalid request: {error_data.get('error', 'Unknown error')}")
-        elif not response.ok:
-            raise RuntimeError(f"API request failed with status {response.status_code}: {response.text}")
-
-        return response.json()
-
-    @staticmethod
-    def poll_task_with_progress(api_key, task_id, segmentation):
-        """Poll for task completion with smooth progress bar."""
-        headers = {"X-API-Key": api_key}
-
-        params = {"taskId": task_id}
-        if segmentation:
-            params["segmentation"] = "true"
-
-        start_time = time.time()
-        poll_interval = 3.0
-
-        while True:
-            elapsed = time.time() - start_time
-
-            # Calculate smooth progress (0-95% over 5 minutes, last 5% on completion)
-            progress = min(95, (elapsed / BespokeAI3DGeneration.GENERATION_TIME) * 95)
-
-            # Create progress bar
-            bar_length = 40
-            filled = int(bar_length * progress / 100)
-            bar = "=" * filled + ">" + " " * (bar_length - filled - 1)
-            elapsed_min = int(elapsed // 60)
-            elapsed_sec = int(elapsed % 60)
-
-            print(f"\r[BespokeAI] [{bar}] {progress:.1f}% - {elapsed_min:02d}:{elapsed_sec:02d} elapsed", end="", flush=True)
-
-            # Check API status
-            response = requests.get(BespokeAI3DGeneration.API_URL, headers=headers, params=params, timeout=30)
-
-            if not response.ok:
-                print()  # New line after progress bar
-                error_data = response.json() if response.text else {}
-                raise RuntimeError(f"Generation failed: {error_data.get('error', response.text)}")
-
-            data = response.json()
-            status = data.get("status", "unknown")
-
-            if status == "complete":
-                # Show 100% completion
-                bar = "=" * bar_length
-                print(f"\r[BespokeAI] [{bar}] 100.0% - Complete!                    ")
-                return data
-            elif status == "failed" or "error" in data:
-                print()  # New line after progress bar
-                raise RuntimeError(f"Generation failed: {data.get('error', 'Unknown error')}")
-
-            time.sleep(poll_interval)
+        return (mesh, glb_url)
 
 
-class BespokeAI3DGenerationFromURL(IO.ComfyNode):
+class BespokeAI3DGenerationFromURL:
     """
     Generate 3D models from image URLs using BespokeAI API.
     Use this node if you already have an image URL instead of a ComfyUI image.
@@ -303,30 +324,41 @@ class BespokeAI3DGenerationFromURL(IO.ComfyNode):
     GENERATION_TIME = 300
 
     @classmethod
-    def define_schema(cls):
-        return IO.Schema(
-            node_id="BespokeAI3DGenerationFromURL",
-            display_name="BespokeAI 3D Generation (URL)",
-            category="BespokeAI/3D",
-            inputs=[
-                IO.String.Input("image_url", default="", multiline=False),
-                IO.String.Input("api_key", default="", multiline=False),
-                IO.Combo.Input("resolution", options=["500k", "1m", "1.5m"], default="1m"),
-                IO.Boolean.Input("with_texture", default=True),
-                IO.Boolean.Input("ai_enhancement", default=True),
-                IO.Boolean.Input("low_poly", default=False, optional=True),
-                IO.Boolean.Input("segmentation", default=False, optional=True),
-                IO.String.Input("prompt", default="", multiline=True, optional=True),
-            ],
-            outputs=[
-                IO.Mesh.Output("mesh"),
-                IO.String.Output("glb_url"),
-            ]
-        )
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image_url": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                }),
+                "api_key": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                }),
+                "resolution": (["500k", "1m", "1.5m"], {"default": "1m"}),
+                "with_texture": ("BOOLEAN", {"default": True}),
+                "ai_enhancement": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "low_poly": ("BOOLEAN", {"default": False}),
+                "segmentation": ("BOOLEAN", {"default": False}),
+                "prompt": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                }),
+            }
+        }
 
-    @classmethod
-    def execute(cls, image_url, api_key, resolution, with_texture, ai_enhancement,
-                low_poly=False, segmentation=False, prompt="") -> IO.NodeOutput:
+    RETURN_TYPES = ("MESH", "STRING")
+    RETURN_NAMES = ("mesh", "glb_url")
+    FUNCTION = "generate_3d"
+    CATEGORY = "BespokeAI/3D"
+
+    def __init__(self):
+        self._main = BespokeAI3DGeneration()
+
+    def generate_3d(self, image_url, api_key, resolution, with_texture, ai_enhancement,
+                    low_poly=False, segmentation=False, prompt=""):
         """Generate 3D from image URL."""
 
         if not api_key or not api_key.strip():
@@ -343,7 +375,7 @@ class BespokeAI3DGenerationFromURL(IO.ComfyNode):
             resolution = "500k"
 
         print("[BespokeAI] Submitting 3D generation request...")
-        submit_response = BespokeAI3DGeneration.submit_generation(
+        submit_response = self._main.submit_generation(
             api_key=api_key,
             image_data=image_url,
             resolution=resolution,
@@ -359,7 +391,7 @@ class BespokeAI3DGenerationFromURL(IO.ComfyNode):
         print(f"[BespokeAI] Task submitted: {task_id}")
         print("[BespokeAI] Generating 3D model (this may take up to 5 minutes)...")
 
-        result = BespokeAI3DGeneration.poll_task_with_progress(
+        result = self._main.poll_task_with_progress(
             api_key=api_key,
             task_id=task_id,
             segmentation=segmentation
@@ -393,26 +425,20 @@ class BespokeAI3DGenerationFromURL(IO.ComfyNode):
         vertices = vertices.unsqueeze(0)
         faces = faces.unsqueeze(0)
 
-        mesh = Types.MESH(vertices, faces)
+        mesh = MESH(vertices, faces)
 
         print("[BespokeAI] 3D generation complete!")
 
-        return IO.NodeOutput(mesh, glb_url)
+        return (mesh, glb_url)
 
 
-# Export for ComfyUI extension system
-from comfy_api.latest import ComfyExtension
-from typing_extensions import override
+# Node mappings for ComfyUI
+NODE_CLASS_MAPPINGS = {
+    "BespokeAI3DGeneration": BespokeAI3DGeneration,
+    "BespokeAI3DGenerationFromURL": BespokeAI3DGenerationFromURL,
+}
 
-
-class BespokeAI3DExtension(ComfyExtension):
-    @override
-    async def get_node_list(self) -> list[type[IO.ComfyNode]]:
-        return [
-            BespokeAI3DGeneration,
-            BespokeAI3DGenerationFromURL,
-        ]
-
-
-async def comfy_entrypoint() -> BespokeAI3DExtension:
-    return BespokeAI3DExtension()
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "BespokeAI3DGeneration": "BespokeAI 3D Generation",
+    "BespokeAI3DGenerationFromURL": "BespokeAI 3D Generation (URL)",
+}
