@@ -245,8 +245,8 @@ class BespokeAI3DGeneration:
         print(f"[BespokeAI] 3D model saved: {glb_path}")
         print("[BespokeAI] 3D generation complete!")
 
-        # Return results for UI
-        return {"ui": {"glb_files": [{"filename": filename, "subfolder": "bespokeai_3d", "type": "output"}]},
+        # Return results for UI - use "3d" key for built-in 3D viewer
+        return {"ui": {"3d": [{"filename": filename, "subfolder": "bespokeai_3d", "type": "output"}]},
                 "result": (glb_path, glb_url)}
 
 
@@ -367,13 +367,14 @@ class BespokeAI3DGenerationFromURL:
         print(f"[BespokeAI] 3D model saved: {glb_path}")
         print("[BespokeAI] 3D generation complete!")
 
-        return {"ui": {"glb_files": [{"filename": filename, "subfolder": "bespokeai_3d", "type": "output"}]},
+        # Return results for UI - use "3d" key for built-in 3D viewer
+        return {"ui": {"3d": [{"filename": filename, "subfolder": "bespokeai_3d", "type": "output"}]},
                 "result": (glb_path, glb_url)}
 
 
 class BespokeAI3DPreview:
     """
-    Preview a 3D GLB file in ComfyUI.
+    Preview a 3D GLB file in ComfyUI using the built-in 3D viewer.
     Takes a file path to a GLB file and displays it.
     """
 
@@ -393,13 +394,20 @@ class BespokeAI3DPreview:
     def preview_3d(self, glb_path):
         if not glb_path or not os.path.exists(glb_path):
             print("[BespokeAI] No valid GLB file path provided")
-            return {"ui": {"glb_files": []}}
+            return {"ui": {"3d": []}}
 
-        # Get relative path info for UI
+        # Get relative path info for UI - must use forward slashes
         output_dir = folder_paths.get_output_directory()
-        if glb_path.startswith(output_dir):
-            rel_path = os.path.relpath(glb_path, output_dir)
-            parts = rel_path.replace("\\", "/").split("/")
+
+        # Normalize paths for comparison
+        glb_path_norm = os.path.normpath(glb_path)
+        output_dir_norm = os.path.normpath(output_dir)
+
+        if glb_path_norm.startswith(output_dir_norm):
+            rel_path = os.path.relpath(glb_path_norm, output_dir_norm)
+            # Convert to forward slashes for web
+            rel_path = rel_path.replace("\\", "/")
+            parts = rel_path.split("/")
             if len(parts) > 1:
                 subfolder = "/".join(parts[:-1])
                 filename = parts[-1]
@@ -411,7 +419,9 @@ class BespokeAI3DPreview:
             filename = os.path.basename(glb_path)
 
         print(f"[BespokeAI] 3D Preview: {glb_path}")
-        return {"ui": {"glb_files": [{"filename": filename, "subfolder": subfolder, "type": "output"}]}}
+
+        # Use "3d" key for ComfyUI's built-in 3D viewer
+        return {"ui": {"3d": [{"filename": filename, "subfolder": subfolder, "type": "output"}]}}
 
 
 # Node mappings for ComfyUI
