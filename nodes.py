@@ -260,9 +260,19 @@ class BespokeAI3DGeneration:
         print(f"[BespokeAI] 3D model saved: {glb_path}")
         print("[BespokeAI] 3D generation complete!")
 
-        # Return results for UI - use "3d" key for built-in 3D viewer
-        return {"ui": {"3d": [{"filename": filename, "subfolder": "bespokeai_3d", "type": "output"}]},
-                "result": (glb_path, glb_url)}
+        # Build model path for Preview3D viewer
+        model_path = f"output/bespokeai_3d/{filename}"
+
+        # Return results for UI
+        # - "result" key triggers ComfyUI's built-in Preview3D viewer
+        # - "3d" key is a fallback for compatibility
+        return {
+            "ui": {
+                "result": [model_path, None, None],
+                "3d": [{"filename": filename, "subfolder": "bespokeai_3d", "type": "output"}]
+            },
+            "result": (glb_path, glb_url)
+        }
 
 
 class BespokeAI3DGenerationFromURL:
@@ -391,15 +401,26 @@ class BespokeAI3DGenerationFromURL:
         print(f"[BespokeAI] 3D model saved: {glb_path}")
         print("[BespokeAI] 3D generation complete!")
 
-        # Return results for UI - use "3d" key for built-in 3D viewer
-        return {"ui": {"3d": [{"filename": filename, "subfolder": "bespokeai_3d", "type": "output"}]},
-                "result": (glb_path, glb_url)}
+        # Build model path for Preview3D viewer
+        model_path = f"output/bespokeai_3d/{filename}"
+
+        # Return results for UI
+        # - "result" key triggers ComfyUI's built-in Preview3D viewer
+        # - "3d" key is a fallback for compatibility
+        return {
+            "ui": {
+                "result": [model_path, None, None],
+                "3d": [{"filename": filename, "subfolder": "bespokeai_3d", "type": "output"}]
+            },
+            "result": (glb_path, glb_url)
+        }
 
 
 class BespokeAI3DPreview:
     """
     Preview a 3D GLB file in ComfyUI using the built-in 3D viewer.
     Takes a file path to a GLB file and displays it.
+    Compatible with ComfyUI's built-in Preview3D viewer format.
     """
 
     @classmethod
@@ -418,34 +439,32 @@ class BespokeAI3DPreview:
     def preview_3d(self, glb_path):
         if not glb_path or not os.path.exists(glb_path):
             print("[BespokeAI] No valid GLB file path provided")
-            return {"ui": {"3d": []}}
+            return {"ui": {"result": ["", None, None]}}
 
-        # Get relative path info for UI - must use forward slashes
+        # Get relative path for the 3D viewer
+        # The built-in viewer expects paths relative to output directory
         output_dir = folder_paths.get_output_directory()
+        input_dir = folder_paths.get_input_directory()
 
-        # Normalize paths for comparison
         glb_path_norm = os.path.normpath(glb_path)
         output_dir_norm = os.path.normpath(output_dir)
+        input_dir_norm = os.path.normpath(input_dir)
 
+        # Try to get relative path from output or input directory
         if glb_path_norm.startswith(output_dir_norm):
             rel_path = os.path.relpath(glb_path_norm, output_dir_norm)
-            # Convert to forward slashes for web
-            rel_path = rel_path.replace("\\", "/")
-            parts = rel_path.split("/")
-            if len(parts) > 1:
-                subfolder = "/".join(parts[:-1])
-                filename = parts[-1]
-            else:
-                subfolder = ""
-                filename = parts[0]
+            model_path = "output/" + rel_path.replace("\\", "/")
+        elif glb_path_norm.startswith(input_dir_norm):
+            rel_path = os.path.relpath(glb_path_norm, input_dir_norm)
+            model_path = rel_path.replace("\\", "/")
         else:
-            subfolder = ""
-            filename = os.path.basename(glb_path)
+            # Use absolute path as fallback
+            model_path = glb_path.replace("\\", "/")
 
-        print(f"[BespokeAI] 3D Preview: {glb_path}")
+        print(f"[BespokeAI] 3D Preview: {model_path}")
 
-        # Use "3d" key for ComfyUI's built-in 3D viewer
-        return {"ui": {"3d": [{"filename": filename, "subfolder": subfolder, "type": "output"}]}}
+        # Return in Preview3D format: [model_file, camera_info, bg_image_path]
+        return {"ui": {"result": [model_path, None, None]}}
 
 
 # Node mappings for ComfyUI
