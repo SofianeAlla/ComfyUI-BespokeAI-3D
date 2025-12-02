@@ -7,6 +7,7 @@ import os
 import time
 import json
 import base64
+import shutil
 import requests
 import numpy as np
 from io import BytesIO
@@ -397,24 +398,29 @@ class BespokeAI3DPreview:
     Preview a 3D GLB file in ComfyUI using the built-in 3D viewer.
     Connect the glb_path output from BespokeAI 3D Generation to this node.
     The 3D viewer displays natively and loads the generated model after execution.
+
+    When a generated model is connected, it's automatically copied to the input/3d
+    folder so it appears in the dropdown for future use.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
-        # Get list of 3D files from output directory for the viewer
-        output_dir = folder_paths.get_output_directory()
-        model_dir = os.path.join(output_dir, "bespokeai_3d")
-        os.makedirs(model_dir, exist_ok=True)
+        # Use input/3d folder like Load3D does
+        input_dir = os.path.join(folder_paths.get_input_directory(), "3d")
+        os.makedirs(input_dir, exist_ok=True)
 
-        files = [""]
-        if os.path.exists(model_dir):
-            for f in os.listdir(model_dir):
-                if f.lower().endswith(('.glb', '.gltf', '.obj', '.fbx', '.stl')):
-                    files.append(f"bespokeai_3d/{f}")
+        # Collect all 3D files
+        files = []
+        for f in os.listdir(input_dir):
+            if f.lower().endswith(('.glb', '.gltf', '.obj', '.fbx', '.stl')):
+                files.append(f"3d/{f}")
+
+        # Add empty option at start
+        files = [""] + sorted(files)
 
         return {
             "required": {
-                "model_file": (sorted(files), {"default": ""}),
+                "model_file": (files, {"default": files[0] if files else ""}),
                 "image": ("LOAD_3D", {}),
             },
             "optional": {
@@ -429,27 +435,29 @@ class BespokeAI3DPreview:
     EXPERIMENTAL = True
 
     def preview_3d(self, model_file, image, glb_path=""):
-        # If a glb_path is connected, use it to determine the viewer path
-        if glb_path and glb_path.strip():
-            output_dir = folder_paths.get_output_directory()
-            model_file_norm = os.path.normpath(glb_path)
-            output_dir_norm = os.path.normpath(output_dir)
+        input_dir = folder_paths.get_input_directory()
+        input_3d_dir = os.path.join(input_dir, "3d")
+        os.makedirs(input_3d_dir, exist_ok=True)
 
-            if model_file_norm.startswith(output_dir_norm):
-                rel_path = os.path.relpath(model_file_norm, output_dir_norm)
-                viewer_path = rel_path.replace("\\", "/")
-            else:
-                viewer_path = glb_path.replace("\\", "/")
+        # If a glb_path is connected from generation, copy it to input/3d
+        if glb_path and glb_path.strip() and os.path.exists(glb_path):
+            # Copy the generated file to input/3d folder
+            filename = os.path.basename(glb_path)
+            dest_path = os.path.join(input_3d_dir, filename)
 
-            print(f"[BespokeAI] 3D Preview (from generation): {viewer_path}")
+            if not os.path.exists(dest_path):
+                shutil.copy2(glb_path, dest_path)
+                print(f"[BespokeAI] Copied model to input/3d: {filename}")
 
-            # Return UI result to update the viewer with the new model
-            return {"ui": {"result": [f"output/{viewer_path}", None, None]}}
+            # Return the path relative to input folder for the viewer
+            viewer_path = f"3d/{filename}"
+            print(f"[BespokeAI] 3D Preview: {viewer_path}")
+            return {"ui": {"result": [viewer_path, None, None]}}
 
         # Otherwise use the dropdown selection
         if model_file:
             print(f"[BespokeAI] 3D Preview (from dropdown): {model_file}")
-            return {"ui": {"result": [f"output/{model_file}", None, None]}}
+            return {"ui": {"result": [model_file, None, None]}}
 
         print("[BespokeAI] No model file provided")
         return {"ui": {"result": ["", None, None]}}
