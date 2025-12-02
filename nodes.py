@@ -11,9 +11,11 @@ import struct
 import requests
 import numpy as np
 import torch
+import threading
 from io import BytesIO
 from PIL import Image
 import folder_paths
+import comfy.utils
 
 
 def parse_glb(glb_data):
@@ -200,44 +202,67 @@ class BespokeAI3DGeneration:
             params["segmentation"] = "true"
 
         start_time = time.time()
-        poll_interval = 3.0
+        poll_interval = 5.0  # Poll API every 5 seconds
 
-        while True:
-            elapsed = time.time() - start_time
+        # Total steps for 5 minutes = 300 seconds
+        total_steps = 100
+        pbar = comfy.utils.ProgressBar(total_steps)
 
-            # Calculate smooth progress (0-95% over 5 minutes, last 5% on completion)
-            progress = min(95, (elapsed / self.GENERATION_TIME) * 95)
+        # Track completion status
+        completed = False
+        result_data = None
+        error_msg = None
 
-            # Create progress bar
-            bar_length = 40
-            filled = int(bar_length * progress / 100)
-            bar = "=" * filled + ">" + " " * (bar_length - filled - 1)
-            elapsed_min = int(elapsed // 60)
-            elapsed_sec = int(elapsed % 60)
+        def update_progress():
+            """Update progress bar smoothly every second."""
+            nonlocal completed
+            while not completed:
+                elapsed = time.time() - start_time
+                # Progress goes from 0 to 95 over 5 minutes (300 seconds)
+                current_step = min(95, int((elapsed / self.GENERATION_TIME) * 95))
+                pbar.update_absolute(current_step)
+                time.sleep(1)
 
-            print(f"\r[BespokeAI] [{bar}] {progress:.1f}% - {elapsed_min:02d}:{elapsed_sec:02d} elapsed", end="", flush=True)
+        # Start progress updater thread
+        progress_thread = threading.Thread(target=update_progress, daemon=True)
+        progress_thread.start()
 
-            # Check API status
-            response = requests.get(self.API_URL, headers=headers, params=params, timeout=30)
+        try:
+            while True:
+                # Check API status
+                try:
+                    response = requests.get(self.API_URL, headers=headers, params=params, timeout=30)
+                except requests.exceptions.RequestException as e:
+                    # Network error, keep trying
+                    time.sleep(poll_interval)
+                    continue
 
-            if not response.ok:
-                print()  # New line after progress bar
-                error_data = response.json() if response.text else {}
-                raise RuntimeError(f"Generation failed: {error_data.get('error', response.text)}")
+                if not response.ok:
+                    error_data = response.json() if response.text else {}
+                    error_msg = f"Generation failed: {error_data.get('error', response.text)}"
+                    break
 
-            data = response.json()
-            status = data.get("status", "unknown")
+                data = response.json()
+                status = data.get("status", "unknown")
 
-            if status == "complete":
-                # Show 100% completion
-                bar = "=" * bar_length
-                print(f"\r[BespokeAI] [{bar}] 100.0% - Complete!                    ")
-                return data
-            elif status == "failed" or "error" in data:
-                print()  # New line after progress bar
-                raise RuntimeError(f"Generation failed: {data.get('error', 'Unknown error')}")
+                if status == "complete":
+                    result_data = data
+                    break
+                elif status == "failed" or "error" in data:
+                    error_msg = f"Generation failed: {data.get('error', 'Unknown error')}"
+                    break
 
-            time.sleep(poll_interval)
+                time.sleep(poll_interval)
+        finally:
+            completed = True
+            progress_thread.join(timeout=2)
+
+        if error_msg:
+            raise RuntimeError(error_msg)
+
+        # Show 100% completion
+        pbar.update_absolute(100)
+        return result_data
 
     def generate_3d(self, image, api_key, resolution, with_texture, ai_enhancement,
                     low_poly=False, segmentation=False, prompt=""):
