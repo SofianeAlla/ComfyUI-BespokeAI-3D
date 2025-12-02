@@ -7,103 +7,19 @@ import os
 import time
 import json
 import base64
-import struct
 import requests
 import numpy as np
-import torch
 from io import BytesIO
 from PIL import Image
 import folder_paths
 import comfy.utils
 
 
-def parse_glb(glb_data):
-    """Parse GLB binary data and extract vertices and faces as torch tensors."""
-    # GLB Header: magic (4) + version (4) + length (4)
-    magic, version, length = struct.unpack('<4sII', glb_data[:12])
-
-    if magic != b'glTF':
-        raise ValueError("Invalid GLB file: wrong magic number")
-
-    offset = 12
-    json_chunk = None
-    bin_chunk = None
-
-    while offset < len(glb_data):
-        chunk_length, chunk_type = struct.unpack('<II', glb_data[offset:offset+8])
-        offset += 8
-        chunk_data = glb_data[offset:offset+chunk_length]
-        offset += chunk_length
-
-        if chunk_type == 0x4E4F534A:  # JSON
-            json_chunk = json.loads(chunk_data.decode('utf-8'))
-        elif chunk_type == 0x004E4942:  # BIN
-            bin_chunk = chunk_data
-
-    if json_chunk is None or bin_chunk is None:
-        raise ValueError("Invalid GLB file: missing JSON or BIN chunk")
-
-    # Extract mesh data
-    mesh = json_chunk['meshes'][0]
-    primitive = mesh['primitives'][0]
-
-    # Get position accessor
-    position_accessor_idx = primitive['attributes']['POSITION']
-    position_accessor = json_chunk['accessors'][position_accessor_idx]
-    position_buffer_view = json_chunk['bufferViews'][position_accessor['bufferView']]
-
-    # Get indices accessor
-    indices_accessor_idx = primitive['indices']
-    indices_accessor = json_chunk['accessors'][indices_accessor_idx]
-    indices_buffer_view = json_chunk['bufferViews'][indices_accessor['bufferView']]
-
-    # Extract vertices
-    v_offset = position_buffer_view.get('byteOffset', 0) + position_accessor.get('byteOffset', 0)
-    v_count = position_accessor['count']
-    vertices_np = np.frombuffer(bin_chunk[v_offset:v_offset + v_count * 12], dtype=np.float32).reshape(-1, 3)
-
-    # Extract indices/faces
-    i_offset = indices_buffer_view.get('byteOffset', 0) + indices_accessor.get('byteOffset', 0)
-    i_count = indices_accessor['count']
-
-    # Handle different component types
-    component_type = indices_accessor['componentType']
-    if component_type == 5125:  # UNSIGNED_INT
-        indices_np = np.frombuffer(bin_chunk[i_offset:i_offset + i_count * 4], dtype=np.uint32)
-    elif component_type == 5123:  # UNSIGNED_SHORT
-        indices_np = np.frombuffer(bin_chunk[i_offset:i_offset + i_count * 2], dtype=np.uint16)
-    elif component_type == 5121:  # UNSIGNED_BYTE
-        indices_np = np.frombuffer(bin_chunk[i_offset:i_offset + i_count], dtype=np.uint8)
-    else:
-        indices_np = np.frombuffer(bin_chunk[i_offset:i_offset + i_count * 4], dtype=np.uint32)
-
-    faces_np = indices_np.reshape(-1, 3).astype(np.int64)
-
-    vertices = torch.from_numpy(vertices_np.copy()).float()
-    faces = torch.from_numpy(faces_np.copy()).long()
-
-    return vertices, faces
-
-
-# Try to import MESH type from ComfyUI
-try:
-    from comfy_api.latest._util import MESH
-except ImportError:
-    try:
-        from comfy_api.latest import Types
-        MESH = Types.MESH
-    except ImportError:
-        # Fallback: define our own MESH class
-        class MESH:
-            def __init__(self, vertices, faces):
-                self.vertices = vertices
-                self.faces = faces
-
-
 class BespokeAI3DGeneration:
     """
     Generate 3D models from images using BespokeAI API.
     Supports AI enhancement, PBR textures, low-poly mode, and part segmentation.
+    Outputs the full GLB file with textures preserved.
     """
 
     API_URL = "https://heovujhdxkvbkaaguzwl.supabase.co/functions/v1/public-3d-api"
@@ -129,13 +45,15 @@ class BespokeAI3DGeneration:
                     "default": "",
                     "multiline": True,
                 }),
+                "filename_prefix": ("STRING", {"default": "bespokeai_3d"}),
             }
         }
 
-    RETURN_TYPES = ("MESH", "STRING")
-    RETURN_NAMES = ("mesh", "glb_url")
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("glb_path", "glb_url")
     FUNCTION = "generate_3d"
     CATEGORY = "BespokeAI/3D"
+    OUTPUT_NODE = True
 
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
@@ -202,9 +120,8 @@ class BespokeAI3DGeneration:
 
         start_time = time.time()
 
-        # 5 minutes = 300 seconds, update every 3 seconds = 100 steps
+        # 5 minutes = 300 seconds, 100 steps
         total_steps = 100
-        step_duration = self.GENERATION_TIME / total_steps  # 3 seconds per step
         pbar = comfy.utils.ProgressBar(total_steps)
 
         current_step = 0
@@ -257,7 +174,7 @@ class BespokeAI3DGeneration:
         raise RuntimeError("Generation timed out after 5 minutes. Please try again.")
 
     def generate_3d(self, image, api_key, resolution, with_texture, ai_enhancement,
-                    low_poly=False, segmentation=False, prompt=""):
+                    low_poly=False, segmentation=False, prompt="", filename_prefix="bespokeai_3d"):
         """Main generation function."""
 
         if not api_key or not api_key.strip():
@@ -312,23 +229,25 @@ class BespokeAI3DGeneration:
         if not glb_url:
             raise RuntimeError("No GLB URL returned from API")
 
-        # Download and parse GLB
-        print("[BespokeAI] Downloading GLB file...")
+        # Download and save the full GLB file (with textures!)
+        print("[BespokeAI] Downloading GLB file (with textures)...")
         response = requests.get(glb_url, timeout=120)
         response.raise_for_status()
 
-        print("[BespokeAI] Parsing 3D mesh...")
-        vertices, faces = parse_glb(response.content)
+        # Save to file
+        timestamp = int(time.time())
+        filename = f"{filename_prefix}_{timestamp}.glb"
+        glb_path = os.path.join(self.model_dir, filename)
 
-        # Add batch dimension
-        vertices = vertices.unsqueeze(0)
-        faces = faces.unsqueeze(0)
+        with open(glb_path, "wb") as f:
+            f.write(response.content)
 
-        mesh = MESH(vertices, faces)
-
+        print(f"[BespokeAI] 3D model saved: {glb_path}")
         print("[BespokeAI] 3D generation complete!")
 
-        return (mesh, glb_url)
+        # Return results for UI
+        return {"ui": {"glb_files": [{"filename": filename, "subfolder": "bespokeai_3d", "type": "output"}]},
+                "result": (glb_path, glb_url)}
 
 
 class BespokeAI3DGenerationFromURL:
@@ -363,19 +282,21 @@ class BespokeAI3DGenerationFromURL:
                     "default": "",
                     "multiline": True,
                 }),
+                "filename_prefix": ("STRING", {"default": "bespokeai_3d"}),
             }
         }
 
-    RETURN_TYPES = ("MESH", "STRING")
-    RETURN_NAMES = ("mesh", "glb_url")
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("glb_path", "glb_url")
     FUNCTION = "generate_3d"
     CATEGORY = "BespokeAI/3D"
+    OUTPUT_NODE = True
 
     def __init__(self):
         self._main = BespokeAI3DGeneration()
 
     def generate_3d(self, image_url, api_key, resolution, with_texture, ai_enhancement,
-                    low_poly=False, segmentation=False, prompt=""):
+                    low_poly=False, segmentation=False, prompt="", filename_prefix="bespokeai_3d"):
         """Generate 3D from image URL."""
 
         if not api_key or not api_key.strip():
@@ -430,32 +351,78 @@ class BespokeAI3DGenerationFromURL:
         if not glb_url:
             raise RuntimeError("No GLB URL returned from API")
 
-        # Download and parse GLB
-        print("[BespokeAI] Downloading GLB file...")
+        # Download and save the full GLB file (with textures!)
+        print("[BespokeAI] Downloading GLB file (with textures)...")
         response = requests.get(glb_url, timeout=120)
         response.raise_for_status()
 
-        print("[BespokeAI] Parsing 3D mesh...")
-        vertices, faces = parse_glb(response.content)
+        # Save to file
+        timestamp = int(time.time())
+        filename = f"{filename_prefix}_{timestamp}.glb"
+        glb_path = os.path.join(self._main.model_dir, filename)
 
-        # Add batch dimension
-        vertices = vertices.unsqueeze(0)
-        faces = faces.unsqueeze(0)
+        with open(glb_path, "wb") as f:
+            f.write(response.content)
 
-        mesh = MESH(vertices, faces)
-
+        print(f"[BespokeAI] 3D model saved: {glb_path}")
         print("[BespokeAI] 3D generation complete!")
 
-        return (mesh, glb_url)
+        return {"ui": {"glb_files": [{"filename": filename, "subfolder": "bespokeai_3d", "type": "output"}]},
+                "result": (glb_path, glb_url)}
+
+
+class BespokeAI3DPreview:
+    """
+    Preview a 3D GLB file in ComfyUI.
+    Takes a file path to a GLB file and displays it.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "glb_path": ("STRING", {"forceInput": True}),
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "preview_3d"
+    CATEGORY = "BespokeAI/3D"
+    OUTPUT_NODE = True
+
+    def preview_3d(self, glb_path):
+        if not glb_path or not os.path.exists(glb_path):
+            print("[BespokeAI] No valid GLB file path provided")
+            return {"ui": {"glb_files": []}}
+
+        # Get relative path info for UI
+        output_dir = folder_paths.get_output_directory()
+        if glb_path.startswith(output_dir):
+            rel_path = os.path.relpath(glb_path, output_dir)
+            parts = rel_path.replace("\\", "/").split("/")
+            if len(parts) > 1:
+                subfolder = "/".join(parts[:-1])
+                filename = parts[-1]
+            else:
+                subfolder = ""
+                filename = parts[0]
+        else:
+            subfolder = ""
+            filename = os.path.basename(glb_path)
+
+        print(f"[BespokeAI] 3D Preview: {glb_path}")
+        return {"ui": {"glb_files": [{"filename": filename, "subfolder": subfolder, "type": "output"}]}}
 
 
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "BespokeAI3DGeneration": BespokeAI3DGeneration,
     "BespokeAI3DGenerationFromURL": BespokeAI3DGenerationFromURL,
+    "BespokeAI3DPreview": BespokeAI3DPreview,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BespokeAI3DGeneration": "BespokeAI 3D Generation",
     "BespokeAI3DGenerationFromURL": "BespokeAI 3D Generation (URL)",
+    "BespokeAI3DPreview": "BespokeAI 3D Preview",
 }
