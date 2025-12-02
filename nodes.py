@@ -33,6 +33,7 @@ class BespokeAI3DGeneration:
                 "api_key": ("STRING", {
                     "default": "",
                     "multiline": False,
+                    "password": True,
                 }),
                 "resolution": (["500k", "1m", "1.5m"], {"default": "1m"}),
                 "with_texture": ("BOOLEAN", {"default": True}),
@@ -110,20 +111,15 @@ class BespokeAI3DGeneration:
 
         return response.json()
 
-    def poll_task_with_progress(self, api_key, task_id, segmentation):
-        """Poll for task completion with smooth 5-minute progress bar."""
+    def poll_task_with_progress(self, api_key, task_id, segmentation, pbar, start_time):
+        """Poll for task completion with progress bar that started at task execution."""
         headers = {"X-API-Key": api_key}
 
         params = {"taskId": task_id}
         if segmentation:
             params["segmentation"] = "true"
 
-        start_time = time.time()
-
-        # 5 minutes = 300 seconds, 100 steps
         total_steps = 100
-        pbar = comfy.utils.ProgressBar(total_steps)
-
         current_step = 0
         last_check_time = 0
         check_interval = 5.0  # Check API every 5 seconds
@@ -167,7 +163,7 @@ class BespokeAI3DGeneration:
             # Small sleep to prevent busy loop
             time.sleep(0.5)
 
-        # If we reach here, 5 minutes passed - do one final check
+        # If we reach here, time passed - do one final check
         try:
             response = requests.get(self.API_URL, headers=headers, params=params, timeout=30)
             if response.ok:
@@ -178,7 +174,7 @@ class BespokeAI3DGeneration:
         except:
             pass
 
-        raise RuntimeError("Generation timed out after 5 minutes. Please try again.")
+        raise RuntimeError("Generation timed out. Please try again.")
 
     def generate_3d(self, image, api_key, resolution, with_texture, ai_enhancement,
                     low_poly=False, segmentation=False, prompt="", filename_prefix="bespokeai_3d"):
@@ -189,12 +185,22 @@ class BespokeAI3DGeneration:
 
         api_key = api_key.strip()
 
+        # Start progress bar and timer IMMEDIATELY when task executes
+        total_steps = 100
+        pbar = comfy.utils.ProgressBar(total_steps)
+        start_time = time.time()
+        pbar.update_absolute(0)
+
         if segmentation and resolution != "500k":
             print("[BespokeAI] Warning: Segmentation only works with 500k resolution. Forcing 500k.")
             resolution = "500k"
 
         print("[BespokeAI] Preparing image...")
         image_data = self.image_to_base64(image)
+
+        # Update progress after image preparation
+        elapsed = time.time() - start_time
+        pbar.update_absolute(min(5, int((elapsed / self.GENERATION_TIME) * 100)))
 
         print("[BespokeAI] Submitting 3D generation request...")
         submit_response = self.submit_generation(
@@ -211,12 +217,14 @@ class BespokeAI3DGeneration:
         task_id = submit_response.get("taskId")
 
         print(f"[BespokeAI] Task submitted: {task_id}")
-        print("[BespokeAI] Generating 3D model (this may take up to 5 minutes)...")
+        print("[BespokeAI] Generating 3D model (this may take up to 10 minutes)...")
 
         result = self.poll_task_with_progress(
             api_key=api_key,
             task_id=task_id,
-            segmentation=segmentation
+            segmentation=segmentation,
+            pbar=pbar,
+            start_time=start_time
         )
 
         # Extract GLB URL
@@ -277,6 +285,7 @@ class BespokeAI3DGenerationFromURL:
                 "api_key": ("STRING", {
                     "default": "",
                     "multiline": False,
+                    "password": True,
                 }),
                 "resolution": (["500k", "1m", "1.5m"], {"default": "1m"}),
                 "with_texture": ("BOOLEAN", {"default": True}),
@@ -315,6 +324,12 @@ class BespokeAI3DGenerationFromURL:
         api_key = api_key.strip()
         image_url = image_url.strip()
 
+        # Start progress bar and timer IMMEDIATELY when task executes
+        total_steps = 100
+        pbar = comfy.utils.ProgressBar(total_steps)
+        start_time = time.time()
+        pbar.update_absolute(0)
+
         if segmentation and resolution != "500k":
             print("[BespokeAI] Warning: Segmentation only works with 500k resolution. Forcing 500k.")
             resolution = "500k"
@@ -334,12 +349,14 @@ class BespokeAI3DGenerationFromURL:
         task_id = submit_response.get("taskId")
 
         print(f"[BespokeAI] Task submitted: {task_id}")
-        print("[BespokeAI] Generating 3D model (this may take up to 5 minutes)...")
+        print("[BespokeAI] Generating 3D model (this may take up to 10 minutes)...")
 
         result = self._main.poll_task_with_progress(
             api_key=api_key,
             task_id=task_id,
-            segmentation=segmentation
+            segmentation=segmentation,
+            pbar=pbar,
+            start_time=start_time
         )
 
         model_url = result.get("modelUrl", "")
