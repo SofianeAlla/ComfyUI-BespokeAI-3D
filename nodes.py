@@ -23,7 +23,7 @@ class BespokeAI3DGeneration:
     """
 
     API_URL = "https://heovujhdxkvbkaaguzwl.supabase.co/functions/v1/public-3d-api"
-    GENERATION_TIME = 300  # 5 minutes in seconds
+    GENERATION_TIME = 600  # 10 minutes in seconds (some generations take longer)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -151,7 +151,14 @@ class BespokeAI3DGeneration:
                             # Success! Jump to 100%
                             pbar.update_absolute(total_steps)
                             return data
-                        elif status == "failed" or "error" in data:
+                        elif status == "failed":
+                            error_msg = data.get('error', 'Unknown error')
+                            # Don't fail on timeout - backend might still be processing
+                            if "timed out" not in error_msg.lower():
+                                raise RuntimeError(f"Generation failed: {error_msg}")
+                            else:
+                                print(f"\n[BespokeAI] Backend timeout, continuing to wait...")
+                        elif "error" in data and "timed out" not in str(data.get('error', '')).lower():
                             raise RuntimeError(f"Generation failed: {data.get('error', 'Unknown error')}")
                 except requests.exceptions.RequestException:
                     # Network error, continue waiting
