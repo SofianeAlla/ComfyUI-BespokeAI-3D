@@ -7,24 +7,21 @@ import os
 import time
 import json
 import base64
-import shutil
 import requests
 import numpy as np
 from io import BytesIO
 from PIL import Image
 import folder_paths
-import comfy.utils
 
 
 class BespokeAI3DGeneration:
     """
     Generate 3D models from images using BespokeAI API.
     Supports AI enhancement, PBR textures, low-poly mode, and part segmentation.
-    Outputs the full GLB file with textures preserved.
+    Output mesh_path can be connected to ComfyUI's built-in Preview3D node (model_file input).
     """
 
     API_URL = "https://heovujhdxkvbkaaguzwl.supabase.co/functions/v1/public-3d-api"
-    GENERATION_TIME = 600  # 10 minutes in seconds (some generations take longer)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -34,7 +31,7 @@ class BespokeAI3DGeneration:
                 "api_key": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "password": True,
+                    "placeholder": "bspk_your_api_key_here"
                 }),
                 "resolution": (["500k", "1m", "1.5m"], {"default": "1m"}),
                 "with_texture": ("BOOLEAN", {"default": True}),
@@ -46,13 +43,15 @@ class BespokeAI3DGeneration:
                 "prompt": ("STRING", {
                     "default": "",
                     "multiline": True,
+                    "placeholder": "Optional: Custom prompt for AI enhancement"
                 }),
-                "filename_prefix": ("STRING", {"default": "bespokeai_3d"}),
+                "poll_interval": ("FLOAT", {"default": 5.0, "min": 2.0, "max": 30.0, "step": 1.0}),
+                "max_poll_attempts": ("INT", {"default": 120, "min": 10, "max": 600}),
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("glb_path", "glb_url")
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("mesh_path", "model_url", "enhanced_image_url")
     FUNCTION = "generate_3d"
     CATEGORY = "BespokeAI/3D"
     OUTPUT_NODE = True
@@ -64,12 +63,17 @@ class BespokeAI3DGeneration:
 
     def image_to_base64(self, image_tensor):
         """Convert ComfyUI IMAGE tensor to base64 PNG string."""
+        # ComfyUI images are [B, H, W, C] float tensors in range [0, 1]
         if len(image_tensor.shape) == 4:
-            image_tensor = image_tensor[0]
+            image_tensor = image_tensor[0]  # Take first image if batched
 
+        # Convert to numpy and scale to 0-255
         img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
+
+        # Create PIL Image
         pil_image = Image.fromarray(img_np)
 
+        # Convert to base64
         buffer = BytesIO()
         pil_image.save(buffer, format="PNG")
         base64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
@@ -112,73 +116,53 @@ class BespokeAI3DGeneration:
 
         return response.json()
 
-    def poll_task_with_progress(self, api_key, task_id, segmentation, pbar, start_time):
-        """Poll for task completion with progress bar that started at task execution."""
+    def poll_task(self, api_key, task_id, segmentation, poll_interval, max_attempts):
+        """Poll for task completion."""
         headers = {"X-API-Key": api_key}
 
         params = {"taskId": task_id}
         if segmentation:
             params["segmentation"] = "true"
 
-        total_steps = 100
-        current_step = 0
-        last_check_time = 0
-        check_interval = 5.0  # Check API every 5 seconds
-
-        while current_step < total_steps:
-            elapsed = time.time() - start_time
-
-            # Update progress bar based on time (smooth increment)
-            expected_step = min(99, int((elapsed / self.GENERATION_TIME) * 100))
-            if expected_step > current_step:
-                current_step = expected_step
-                pbar.update_absolute(current_step)
-
-            # Check API status periodically
-            if elapsed - last_check_time >= check_interval:
-                last_check_time = elapsed
-                try:
-                    response = requests.get(self.API_URL, headers=headers, params=params, timeout=30)
-
-                    if response.ok:
-                        data = response.json()
-                        status = data.get("status", "unknown")
-
-                        if status == "complete":
-                            # Success! Jump to 100%
-                            pbar.update_absolute(total_steps)
-                            return data
-                        elif status == "failed":
-                            error_msg = data.get('error', 'Unknown error')
-                            # Don't fail on timeout - backend might still be processing
-                            if "timed out" not in error_msg.lower():
-                                raise RuntimeError(f"Generation failed: {error_msg}")
-                            else:
-                                print(f"\n[BespokeAI] Backend timeout, continuing to wait...")
-                        elif "error" in data and "timed out" not in str(data.get('error', '')).lower():
-                            raise RuntimeError(f"Generation failed: {data.get('error', 'Unknown error')}")
-                except requests.exceptions.RequestException:
-                    # Network error, continue waiting
-                    pass
-
-            # Small sleep to prevent busy loop
-            time.sleep(0.5)
-
-        # If we reach here, time passed - do one final check
-        try:
+        for attempt in range(max_attempts):
             response = requests.get(self.API_URL, headers=headers, params=params, timeout=30)
-            if response.ok:
-                data = response.json()
-                if data.get("status") == "complete":
-                    pbar.update_absolute(total_steps)
-                    return data
-        except:
-            pass
 
-        raise RuntimeError("Generation timed out. Please try again.")
+            if not response.ok:
+                error_data = response.json() if response.text else {}
+                raise RuntimeError(f"Polling failed: {error_data.get('error', response.text)}")
+
+            data = response.json()
+            status = data.get("status", "unknown")
+
+            if status == "complete":
+                return data
+            elif status == "processing":
+                progress = data.get("progress", 0)
+                print(f"[BespokeAI] Processing... {progress}% (attempt {attempt + 1}/{max_attempts})")
+                time.sleep(poll_interval)
+            elif status == "failed" or "error" in data:
+                raise RuntimeError(f"Generation failed: {data.get('error', 'Unknown error')}")
+            else:
+                print(f"[BespokeAI] Unknown status: {status}")
+                time.sleep(poll_interval)
+
+        raise TimeoutError(f"Task did not complete within {max_attempts * poll_interval} seconds")
+
+    def download_file(self, url, filename):
+        """Download a file from URL to the output directory."""
+        filepath = os.path.join(self.model_dir, filename)
+
+        response = requests.get(url, timeout=120)
+        response.raise_for_status()
+
+        with open(filepath, "wb") as f:
+            f.write(response.content)
+
+        return filepath
 
     def generate_3d(self, image, api_key, resolution, with_texture, ai_enhancement,
-                    low_poly=False, segmentation=False, prompt="", filename_prefix="bespokeai_3d"):
+                    low_poly=False, segmentation=False, prompt="",
+                    poll_interval=5.0, max_poll_attempts=120):
         """Main generation function."""
 
         if not api_key or not api_key.strip():
@@ -186,23 +170,16 @@ class BespokeAI3DGeneration:
 
         api_key = api_key.strip()
 
-        # Start progress bar and timer IMMEDIATELY when task executes
-        total_steps = 100
-        pbar = comfy.utils.ProgressBar(total_steps)
-        start_time = time.time()
-        pbar.update_absolute(0)
-
+        # Validate segmentation + resolution combo
         if segmentation and resolution != "500k":
             print("[BespokeAI] Warning: Segmentation only works with 500k resolution. Forcing 500k.")
             resolution = "500k"
 
+        # Convert image to base64
         print("[BespokeAI] Preparing image...")
         image_data = self.image_to_base64(image)
 
-        # Update progress after image preparation
-        elapsed = time.time() - start_time
-        pbar.update_absolute(min(5, int((elapsed / self.GENERATION_TIME) * 100)))
-
+        # Submit generation request
         print("[BespokeAI] Submitting 3D generation request...")
         submit_response = self.submit_generation(
             api_key=api_key,
@@ -216,62 +193,59 @@ class BespokeAI3DGeneration:
         )
 
         task_id = submit_response.get("taskId")
+        credits_used = submit_response.get("creditsUsed", 0)
+        enhanced_image_url = submit_response.get("enhancedImageUrl", "")
 
-        print(f"[BespokeAI] Task submitted: {task_id}")
-        print("[BespokeAI] Generating 3D model (this may take up to 10 minutes)...")
+        print(f"[BespokeAI] Task submitted: {task_id} (Credits used: {credits_used})")
 
-        result = self.poll_task_with_progress(
+        # Poll for completion
+        print("[BespokeAI] Waiting for generation to complete...")
+        result = self.poll_task(
             api_key=api_key,
             task_id=task_id,
             segmentation=segmentation,
-            pbar=pbar,
-            start_time=start_time
+            poll_interval=poll_interval,
+            max_attempts=max_poll_attempts
         )
 
-        # Extract GLB URL
+        # Extract file URLs
         model_url = result.get("modelUrl", "")
         result_files = result.get("resultFiles", [])
 
         glb_url = ""
+
         for file_info in result_files:
             file_type = file_info.get("Type", "").lower()
             if file_type == "glb":
                 glb_url = file_info.get("Url", "")
                 break
 
+        # Fallback to modelUrl if specific files not found
         if not glb_url and model_url:
             glb_url = model_url
 
-        if not glb_url:
-            raise RuntimeError("No GLB URL returned from API")
-
-        # Download and save the full GLB file (with textures!)
-        print("[BespokeAI] Downloading GLB file (with textures)...")
-        response = requests.get(glb_url, timeout=120)
-        response.raise_for_status()
-
-        # Save to file
+        # Download GLB file
         timestamp = int(time.time())
-        filename = f"{filename_prefix}_{timestamp}.glb"
-        glb_path = os.path.join(self.model_dir, filename)
+        mesh_path = ""
 
-        with open(glb_path, "wb") as f:
-            f.write(response.content)
+        if glb_url:
+            print("[BespokeAI] Downloading GLB file...")
+            mesh_path = self.download_file(glb_url, f"model_{timestamp}.glb")
+            print(f"[BespokeAI] GLB saved: {mesh_path}")
 
-        print(f"[BespokeAI] 3D model saved: {glb_path}")
         print("[BespokeAI] 3D generation complete!")
 
-        return {"result": (glb_path, glb_url)}
+        return (mesh_path, model_url, enhanced_image_url)
 
 
 class BespokeAI3DGenerationFromURL:
     """
     Generate 3D models from image URLs using BespokeAI API.
     Use this node if you already have an image URL instead of a ComfyUI image.
+    Output mesh_path can be connected to ComfyUI's built-in Preview3D node (model_file input).
     """
 
     API_URL = "https://heovujhdxkvbkaaguzwl.supabase.co/functions/v1/public-3d-api"
-    GENERATION_TIME = 300
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -280,11 +254,12 @@ class BespokeAI3DGenerationFromURL:
                 "image_url": ("STRING", {
                     "default": "",
                     "multiline": False,
+                    "placeholder": "https://example.com/image.jpg"
                 }),
                 "api_key": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "password": True,
+                    "placeholder": "bspk_your_api_key_here"
                 }),
                 "resolution": (["500k", "1m", "1.5m"], {"default": "1m"}),
                 "with_texture": ("BOOLEAN", {"default": True}),
@@ -296,22 +271,30 @@ class BespokeAI3DGenerationFromURL:
                 "prompt": ("STRING", {
                     "default": "",
                     "multiline": True,
+                    "placeholder": "Optional: Custom prompt for AI enhancement"
                 }),
-                "filename_prefix": ("STRING", {"default": "bespokeai_3d"}),
+                "poll_interval": ("FLOAT", {"default": 5.0, "min": 2.0, "max": 30.0, "step": 1.0}),
+                "max_poll_attempts": ("INT", {"default": 120, "min": 10, "max": 600}),
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("glb_path", "glb_url")
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("mesh_path", "model_url", "enhanced_image_url")
     FUNCTION = "generate_3d"
     CATEGORY = "BespokeAI/3D"
     OUTPUT_NODE = True
 
     def __init__(self):
+        self.output_dir = folder_paths.get_output_directory()
+        self.model_dir = os.path.join(self.output_dir, "bespokeai_3d")
+        os.makedirs(self.model_dir, exist_ok=True)
+
+        # Reuse methods from main class
         self._main = BespokeAI3DGeneration()
 
     def generate_3d(self, image_url, api_key, resolution, with_texture, ai_enhancement,
-                    low_poly=False, segmentation=False, prompt="", filename_prefix="bespokeai_3d"):
+                    low_poly=False, segmentation=False, prompt="",
+                    poll_interval=5.0, max_poll_attempts=120):
         """Generate 3D from image URL."""
 
         if not api_key or not api_key.strip():
@@ -323,20 +306,16 @@ class BespokeAI3DGenerationFromURL:
         api_key = api_key.strip()
         image_url = image_url.strip()
 
-        # Start progress bar and timer IMMEDIATELY when task executes
-        total_steps = 100
-        pbar = comfy.utils.ProgressBar(total_steps)
-        start_time = time.time()
-        pbar.update_absolute(0)
-
+        # Validate segmentation + resolution combo
         if segmentation and resolution != "500k":
             print("[BespokeAI] Warning: Segmentation only works with 500k resolution. Forcing 500k.")
             resolution = "500k"
 
+        # Submit generation request with URL directly
         print("[BespokeAI] Submitting 3D generation request...")
         submit_response = self._main.submit_generation(
             api_key=api_key,
-            image_data=image_url,
+            image_data=image_url,  # API accepts URLs directly
             resolution=resolution,
             with_texture=with_texture,
             ai_enhancement=ai_enhancement,
@@ -346,22 +325,27 @@ class BespokeAI3DGenerationFromURL:
         )
 
         task_id = submit_response.get("taskId")
+        credits_used = submit_response.get("creditsUsed", 0)
+        enhanced_image_url = submit_response.get("enhancedImageUrl", "")
 
-        print(f"[BespokeAI] Task submitted: {task_id}")
-        print("[BespokeAI] Generating 3D model (this may take up to 10 minutes)...")
+        print(f"[BespokeAI] Task submitted: {task_id} (Credits used: {credits_used})")
 
-        result = self._main.poll_task_with_progress(
+        # Poll for completion
+        print("[BespokeAI] Waiting for generation to complete...")
+        result = self._main.poll_task(
             api_key=api_key,
             task_id=task_id,
             segmentation=segmentation,
-            pbar=pbar,
-            start_time=start_time
+            poll_interval=poll_interval,
+            max_attempts=max_poll_attempts
         )
 
+        # Extract file URLs
         model_url = result.get("modelUrl", "")
         result_files = result.get("resultFiles", [])
 
         glb_url = ""
+
         for file_info in result_files:
             file_type = file_info.get("Type", "").lower()
             if file_type == "glb":
@@ -371,107 +355,27 @@ class BespokeAI3DGenerationFromURL:
         if not glb_url and model_url:
             glb_url = model_url
 
-        if not glb_url:
-            raise RuntimeError("No GLB URL returned from API")
-
-        # Download and save the full GLB file (with textures!)
-        print("[BespokeAI] Downloading GLB file (with textures)...")
-        response = requests.get(glb_url, timeout=120)
-        response.raise_for_status()
-
-        # Save to file
+        # Download GLB file
         timestamp = int(time.time())
-        filename = f"{filename_prefix}_{timestamp}.glb"
-        glb_path = os.path.join(self._main.model_dir, filename)
+        mesh_path = ""
 
-        with open(glb_path, "wb") as f:
-            f.write(response.content)
+        if glb_url:
+            print("[BespokeAI] Downloading GLB file...")
+            mesh_path = self._main.download_file(glb_url, f"model_{timestamp}.glb")
+            print(f"[BespokeAI] GLB saved: {mesh_path}")
 
-        print(f"[BespokeAI] 3D model saved: {glb_path}")
         print("[BespokeAI] 3D generation complete!")
 
-        return {"result": (glb_path, glb_url)}
-
-
-class BespokeAI3DPreview:
-    """
-    Preview a 3D GLB file in ComfyUI using the built-in 3D viewer.
-    Connect the glb_path output from BespokeAI 3D Generation to this node.
-    The 3D viewer displays natively and loads the generated model after execution.
-
-    When a generated model is connected, it's automatically copied to the input/3d
-    folder so it appears in the dropdown for future use.
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        # Use input/3d folder like Load3D does
-        input_dir = os.path.join(folder_paths.get_input_directory(), "3d")
-        os.makedirs(input_dir, exist_ok=True)
-
-        # Collect all 3D files
-        files = []
-        for f in os.listdir(input_dir):
-            if f.lower().endswith(('.glb', '.gltf', '.obj', '.fbx', '.stl')):
-                files.append(f"3d/{f}")
-
-        # Add empty option at start
-        files = [""] + sorted(files)
-
-        return {
-            "required": {
-                "model_file": (files, {"default": files[0] if files else ""}),
-                "image": ("LOAD_3D", {}),
-            },
-            "optional": {
-                "glb_path": ("STRING", {"default": "", "forceInput": True}),
-            }
-        }
-
-    RETURN_TYPES = ()
-    FUNCTION = "preview_3d"
-    CATEGORY = "BespokeAI/3D"
-    OUTPUT_NODE = True
-    EXPERIMENTAL = True
-
-    def preview_3d(self, model_file, image, glb_path=""):
-        input_dir = folder_paths.get_input_directory()
-        input_3d_dir = os.path.join(input_dir, "3d")
-        os.makedirs(input_3d_dir, exist_ok=True)
-
-        # If a glb_path is connected from generation, copy it to input/3d
-        if glb_path and glb_path.strip() and os.path.exists(glb_path):
-            # Copy the generated file to input/3d folder
-            filename = os.path.basename(glb_path)
-            dest_path = os.path.join(input_3d_dir, filename)
-
-            if not os.path.exists(dest_path):
-                shutil.copy2(glb_path, dest_path)
-                print(f"[BespokeAI] Copied model to input/3d: {filename}")
-
-            # Return the path relative to input folder for the viewer
-            viewer_path = f"3d/{filename}"
-            print(f"[BespokeAI] 3D Preview: {viewer_path}")
-            return {"ui": {"result": [viewer_path, None, None]}}
-
-        # Otherwise use the dropdown selection
-        if model_file:
-            print(f"[BespokeAI] 3D Preview (from dropdown): {model_file}")
-            return {"ui": {"result": [model_file, None, None]}}
-
-        print("[BespokeAI] No model file provided")
-        return {"ui": {"result": ["", None, None]}}
+        return (mesh_path, model_url, enhanced_image_url)
 
 
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "BespokeAI3DGeneration": BespokeAI3DGeneration,
     "BespokeAI3DGenerationFromURL": BespokeAI3DGenerationFromURL,
-    "BespokeAI3DPreview": BespokeAI3DPreview,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BespokeAI3DGeneration": "BespokeAI 3D Generation",
     "BespokeAI3DGenerationFromURL": "BespokeAI 3D Generation (URL)",
-    "BespokeAI3DPreview": "BespokeAI 3D Preview",
 }
