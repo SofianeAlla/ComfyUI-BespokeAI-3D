@@ -12,6 +12,7 @@ import numpy as np
 from io import BytesIO
 from PIL import Image
 import folder_paths
+import comfy.utils
 
 
 class BespokeAI3DGeneration:
@@ -116,8 +117,8 @@ class BespokeAI3DGeneration:
 
         return response.json()
 
-    def poll_task(self, api_key, task_id, segmentation, poll_interval, max_attempts):
-        """Poll for task completion."""
+    def poll_task(self, api_key, task_id, segmentation, poll_interval, max_attempts, pbar=None):
+        """Poll for task completion with progress updates."""
         headers = {"X-API-Key": api_key}
 
         params = {"taskId": task_id}
@@ -135,15 +136,24 @@ class BespokeAI3DGeneration:
             status = data.get("status", "unknown")
 
             if status == "complete":
+                if pbar:
+                    pbar.update_absolute(100)
                 return data
             elif status == "processing":
                 progress = data.get("progress", 0)
+                # Update progress bar - reserve 10-90% for processing, 90-100% for download
+                if pbar and progress > 0:
+                    pbar.update_absolute(10 + int(progress * 0.8))
                 print(f"[BespokeAI] Processing... {progress}% (attempt {attempt + 1}/{max_attempts})")
                 time.sleep(poll_interval)
             elif status == "failed" or "error" in data:
                 raise RuntimeError(f"Generation failed: {data.get('error', 'Unknown error')}")
             else:
-                print(f"[BespokeAI] Unknown status: {status}")
+                # Unknown status - still increment progress slightly to show activity
+                if pbar:
+                    current_progress = 10 + min(attempt * 2, 70)
+                    pbar.update_absolute(current_progress)
+                print(f"[BespokeAI] Status: {status} (attempt {attempt + 1}/{max_attempts})")
                 time.sleep(poll_interval)
 
         raise TimeoutError(f"Task did not complete within {max_attempts * poll_interval} seconds")
@@ -170,16 +180,23 @@ class BespokeAI3DGeneration:
 
         api_key = api_key.strip()
 
+        # Create progress bar immediately when execution starts
+        pbar = comfy.utils.ProgressBar(100)
+        pbar.update_absolute(0)
+        print("[BespokeAI] Starting 3D generation...")
+
         # Validate segmentation + resolution combo
         if segmentation and resolution != "500k":
             print("[BespokeAI] Warning: Segmentation only works with 500k resolution. Forcing 500k.")
             resolution = "500k"
 
-        # Convert image to base64
+        # Convert image to base64 (2%)
         print("[BespokeAI] Preparing image...")
+        pbar.update_absolute(2)
         image_data = self.image_to_base64(image)
+        pbar.update_absolute(5)
 
-        # Submit generation request
+        # Submit generation request (5-10%)
         print("[BespokeAI] Submitting 3D generation request...")
         submit_response = self.submit_generation(
             api_key=api_key,
@@ -191,6 +208,7 @@ class BespokeAI3DGeneration:
             segmentation=segmentation,
             prompt=prompt
         )
+        pbar.update_absolute(10)
 
         task_id = submit_response.get("taskId")
         credits_used = submit_response.get("creditsUsed", 0)
@@ -198,17 +216,19 @@ class BespokeAI3DGeneration:
 
         print(f"[BespokeAI] Task submitted: {task_id} (Credits used: {credits_used})")
 
-        # Poll for completion
-        print("[BespokeAI] Waiting for generation to complete...")
+        # Poll for completion (10-90%)
+        print("[BespokeAI] Generating 3D model (this may take a few minutes)...")
         result = self.poll_task(
             api_key=api_key,
             task_id=task_id,
             segmentation=segmentation,
             poll_interval=poll_interval,
-            max_attempts=max_poll_attempts
+            max_attempts=max_poll_attempts,
+            pbar=pbar
         )
 
-        # Extract file URLs
+        # Extract file URLs (90%)
+        pbar.update_absolute(90)
         model_url = result.get("modelUrl", "")
         result_files = result.get("resultFiles", [])
 
@@ -224,15 +244,17 @@ class BespokeAI3DGeneration:
         if not glb_url and model_url:
             glb_url = model_url
 
-        # Download GLB file
+        # Download GLB file (90-100%)
         timestamp = int(time.time())
         mesh_path = ""
 
         if glb_url:
             print("[BespokeAI] Downloading GLB file...")
+            pbar.update_absolute(95)
             mesh_path = self.download_file(glb_url, f"model_{timestamp}.glb")
             print(f"[BespokeAI] GLB saved: {mesh_path}")
 
+        pbar.update_absolute(100)
         print("[BespokeAI] 3D generation complete!")
 
         return (mesh_path, model_url, enhanced_image_url)
@@ -306,13 +328,19 @@ class BespokeAI3DGenerationFromURL:
         api_key = api_key.strip()
         image_url = image_url.strip()
 
+        # Create progress bar immediately when execution starts
+        pbar = comfy.utils.ProgressBar(100)
+        pbar.update_absolute(0)
+        print("[BespokeAI] Starting 3D generation...")
+
         # Validate segmentation + resolution combo
         if segmentation and resolution != "500k":
             print("[BespokeAI] Warning: Segmentation only works with 500k resolution. Forcing 500k.")
             resolution = "500k"
 
-        # Submit generation request with URL directly
+        # Submit generation request with URL directly (0-10%)
         print("[BespokeAI] Submitting 3D generation request...")
+        pbar.update_absolute(5)
         submit_response = self._main.submit_generation(
             api_key=api_key,
             image_data=image_url,  # API accepts URLs directly
@@ -323,6 +351,7 @@ class BespokeAI3DGenerationFromURL:
             segmentation=segmentation,
             prompt=prompt
         )
+        pbar.update_absolute(10)
 
         task_id = submit_response.get("taskId")
         credits_used = submit_response.get("creditsUsed", 0)
@@ -330,17 +359,19 @@ class BespokeAI3DGenerationFromURL:
 
         print(f"[BespokeAI] Task submitted: {task_id} (Credits used: {credits_used})")
 
-        # Poll for completion
-        print("[BespokeAI] Waiting for generation to complete...")
+        # Poll for completion (10-90%)
+        print("[BespokeAI] Generating 3D model (this may take a few minutes)...")
         result = self._main.poll_task(
             api_key=api_key,
             task_id=task_id,
             segmentation=segmentation,
             poll_interval=poll_interval,
-            max_attempts=max_poll_attempts
+            max_attempts=max_poll_attempts,
+            pbar=pbar
         )
 
-        # Extract file URLs
+        # Extract file URLs (90%)
+        pbar.update_absolute(90)
         model_url = result.get("modelUrl", "")
         result_files = result.get("resultFiles", [])
 
@@ -355,15 +386,17 @@ class BespokeAI3DGenerationFromURL:
         if not glb_url and model_url:
             glb_url = model_url
 
-        # Download GLB file
+        # Download GLB file (90-100%)
         timestamp = int(time.time())
         mesh_path = ""
 
         if glb_url:
             print("[BespokeAI] Downloading GLB file...")
+            pbar.update_absolute(95)
             mesh_path = self._main.download_file(glb_url, f"model_{timestamp}.glb")
             print(f"[BespokeAI] GLB saved: {mesh_path}")
 
+        pbar.update_absolute(100)
         print("[BespokeAI] 3D generation complete!")
 
         return (mesh_path, model_url, enhanced_image_url)
