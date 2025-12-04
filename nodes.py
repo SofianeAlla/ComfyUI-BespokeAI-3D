@@ -7,6 +7,7 @@ import os
 import time
 import json
 import base64
+import shutil
 import requests
 import numpy as np
 from io import BytesIO
@@ -402,13 +403,101 @@ class BespokeAI3DGenerationFromURL:
         return (mesh_path, model_url, enhanced_image_url)
 
 
+class BespokeAI3DPreview:
+    """
+    Preview 3D models (GLB, GLTF, OBJ, FBX, STL) in ComfyUI.
+    Can receive a path from the generation node or select a file from the dropdown.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # Use input/3d folder for model files
+        input_dir = os.path.join(folder_paths.get_input_directory(), "3d")
+        os.makedirs(input_dir, exist_ok=True)
+
+        # Collect all 3D files for the dropdown
+        files = []
+        if os.path.exists(input_dir):
+            for f in os.listdir(input_dir):
+                if f.lower().endswith(('.glb', '.gltf', '.obj', '.fbx', '.stl')):
+                    files.append(f)
+
+        files = sorted(files) if files else ["None"]
+
+        return {
+            "required": {
+                "model_file": (files, {"default": files[0] if files else "None"}),
+            },
+            "optional": {
+                # Main input from generation node
+                "glb_path": ("STRING", {"default": "", "forceInput": True}),
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "preview_3d"
+    CATEGORY = "BespokeAI/3D"
+    OUTPUT_NODE = True
+
+    def preview_3d(self, model_file, glb_path=""):
+        input_dir = folder_paths.get_input_directory()
+        input_3d_dir = os.path.join(input_dir, "3d")
+        os.makedirs(input_3d_dir, exist_ok=True)
+
+        final_filename = None
+        subfolder = "3d"
+
+        # Priority 1: Check if a path came from the Generation Node
+        if glb_path and glb_path.strip() and os.path.exists(glb_path):
+            filename = os.path.basename(glb_path)
+            dest_path = os.path.join(input_3d_dir, filename)
+
+            # Copy file to input/3d so the web server can serve it
+            if not os.path.exists(dest_path) or not os.path.samefile(glb_path, dest_path):
+                shutil.copy2(glb_path, dest_path)
+                print(f"[BespokeAI] Copied generated model to input/3d: {filename}")
+
+            final_filename = filename
+
+        # Priority 2: Use the dropdown selection
+        elif model_file and model_file != "None":
+            final_filename = model_file
+
+        if not final_filename:
+            print("[BespokeAI] No model to preview.")
+            return {"ui": {"mesh": []}}
+
+        print(f"[BespokeAI] Displaying 3D model: {final_filename}")
+
+        # Return data for the frontend viewer
+        # The frontend JS will receive this and render the 3D model
+        return {
+            "ui": {
+                "mesh": [{
+                    "filename": final_filename,
+                    "subfolder": subfolder,
+                    "type": "input"
+                }]
+            }
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, model_file, glb_path=""):
+        # Always re-execute to pick up new files
+        if glb_path and glb_path.strip():
+            return glb_path
+        return model_file
+
+
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "BespokeAI3DGeneration": BespokeAI3DGeneration,
     "BespokeAI3DGenerationFromURL": BespokeAI3DGenerationFromURL,
+    "BespokeAI3DPreview": BespokeAI3DPreview,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BespokeAI3DGeneration": "BespokeAI 3D Generation",
     "BespokeAI3DGenerationFromURL": "BespokeAI 3D Generation (URL)",
+    "BespokeAI3DPreview": "BespokeAI 3D Preview",
 }

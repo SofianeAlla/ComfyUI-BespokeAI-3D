@@ -54,12 +54,18 @@
 
 ## 📦 Installation
 
+### Prerequisites
+
+1. **Download and install ComfyUI** from [comfy.org/download](https://www.comfy.org/download)
+2. Launch ComfyUI at least once to initialize the directory structure
+
 ### Method 1: ComfyUI Manager (Recommended)
 
-1. Open **ComfyUI Manager**
-2. Click **Install Custom Nodes**
-3. Search for `BespokeAI`
-4. Click **Install** and restart ComfyUI
+1. Install [ComfyUI Manager](https://github.com/ltdrdata/ComfyUI-Manager) if not already installed
+2. Open **ComfyUI Manager**
+3. Click **Install Custom Nodes**
+4. Search for `BespokeAI`
+5. Click **Install** and restart ComfyUI
 
 ### Method 2: Git Clone
 
@@ -76,6 +82,12 @@ pip install -r requirements.txt
 2. Extract to `ComfyUI/custom_nodes/`
 3. Install dependencies: `pip install -r requirements.txt`
 4. Restart ComfyUI
+
+### Required Companion Nodes
+
+This node works with the following built-in ComfyUI nodes:
+- **Load Image** (`Charger Image`) - To provide image input to the 3D generation node
+- **3D Preview** (`Aperçu 3D`) - To preview the generated 3D model directly in ComfyUI
 
 ## 🔑 Getting Your API Key
 
@@ -155,8 +167,17 @@ Same as above, but replaces `image` with:
 ### Basic Image to 3D
 
 ```
-Load Image → BespokeAI 3D Generation → Preview 3D Model
+Load Image → BespokeAI 3D Generation → 3D Preview
 ```
+
+<p align="center">
+  <img src="assets/workflow-example.png" alt="Workflow Example" width="100%">
+</p>
+
+The screenshot above shows the correct node setup:
+1. **Load Image** (Charger Image) - Load your source image
+2. **BespokeAI 3D Generation** - Connect the image, enter your API key, and configure options
+3. **3D Preview** (Aperçu 3D) - Connect the `mesh_path` output to preview the generated 3D model
 
 <p align="center">
   <img src="assets/example-basic.png" alt="Basic Example" width="80%">
