@@ -59,15 +59,7 @@
 1. **Download and install ComfyUI** from [comfy.org/download](https://www.comfy.org/download)
 2. Launch ComfyUI at least once to initialize the directory structure
 
-### Method 1: ComfyUI Manager (Recommended)
-
-1. Install [ComfyUI Manager](https://github.com/ltdrdata/ComfyUI-Manager) if not already installed
-2. Open **ComfyUI Manager**
-3. Click **Install Custom Nodes**
-4. Search for `BespokeAI`
-5. Click **Install** and restart ComfyUI
-
-### Method 2: Git Clone
+### Method 1: Git Clone
 
 ```bash
 cd ComfyUI/custom_nodes
@@ -76,7 +68,7 @@ cd ComfyUI-BespokeAI-3D
 pip install -r requirements.txt
 ```
 
-### Method 3: Download ZIP
+### Method 2: Download ZIP
 
 1. Download the [latest release](https://github.com/SofianeAlla/ComfyUI-BespokeAI-3D/releases)
 2. Extract to `ComfyUI/custom_nodes/`
